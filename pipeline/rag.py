@@ -17,6 +17,7 @@ from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore
 from llama_index.core.base.llms.types import CompletionResponse
 from llama_index.postprocessor.rankgpt_rerank import RankGPTRerank
+from langchain import hub
 
 
 # from custom.template import QA_TEMPLATE
@@ -60,7 +61,8 @@ class QdrantRetriever(BaseRetriever):
 
 
 async def generation_with_knowledge_retrieval(
-        query_str: str,
+        origin_query: str,
+        query_strs,
         # retriever: BaseRetriever,
         llm: LLM,
         document: str,
@@ -72,11 +74,16 @@ async def generation_with_knowledge_retrieval(
         debug: bool = False,
         progress=None,
 ) -> CompletionResponse:
+    global query_bundle
     retriever = QdrantRetriever(vector_stores[document], embeding, similarity_top_k=int(config["VECTOR_TOP_K"]))
-    query_bundle = QueryBundle(query_str=query_str)
-    node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
+    context_strs = []
+    all_node_with_scores = []
+    for query_str in query_strs:
+        query_bundle = QueryBundle(query_str=query_str)
+        node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
+        all_node_with_scores += node_with_scores
     if debug:
-        print(f"retrieved:\n{node_with_scores}\n------")
+        print(f"retrieved:\n{all_node_with_scores}\n------")
     if reranker:
         config = dotenv_values(".env")
         reranker = RankGPTRerank(
@@ -89,21 +96,20 @@ async def generation_with_knowledge_retrieval(
             top_n=1,
             verbose=True,
         )
-        node_with_scores = reranker.postprocess_nodes(node_with_scores, query_bundle)
+        node_with_scores = reranker.postprocess_nodes(all_node_with_scores, query_bundle)
         if debug:
             print(f"reranked:\n{node_with_scores}\n------")
     context_str = "\n\n".join(  # 抽取查询到的结果文本
-        [f"{node.metadata['document_title']}: {node.text}" for node in node_with_scores]
+        [f"{node.metadata['document_title']}: {node.text}" for node in all_node_with_scores]
     )
+    context_strs.append(context_str)
     # set the LANGCHAIN_API_KEY environment variable (create key in settings)
-    from langchain import hub
+    context_str = ["\n" + str for str in context_strs]
 
     fmt_qa_prompt = hub.pull("rlm/rag-prompt").format(
-        context=context_str, question=query_str
+        context=context_str, question=origin_query
     )
-    # fmt_qa_prompt = PromptTemplate(qa_template).format(
-    #     context_str=context_str, query_str=query_str
-    # )
+
     ret = await llm.acomplete(fmt_qa_prompt)
     if progress:
         progress.update(1)

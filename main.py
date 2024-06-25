@@ -7,7 +7,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.legacy.llms import OpenAILike as OpenAI
 from qdrant_client import models
 from tqdm.asyncio import tqdm
-
+from langchain.prompts import ChatPromptTemplate
 from pipeline.ingestion import build_pipeline, build_vector_store, read_data
 from pipeline.qa import read_jsonl, save_answers
 from pipeline.rag import QdrantRetriever, generation_with_knowledge_retrieval
@@ -46,26 +46,6 @@ async def main():
     # 初始化 数据ingestion pipeline 和 vector store
     client, vector_stores = await build_vector_store(config, folders, reindex=False)
 
-    # collection_info = await client.get_collection(
-    #     config["COLLECTION_NAME"] or "aiops24"
-    # )
-    #
-    # if collection_info.points_count == 0:
-    #     data = read_data("data")
-    #     pipeline = build_pipeline(llm, embeding, vector_store=vector_store)
-    #     # 暂时停止实时索引
-    #     await client.update_collection(
-    #         collection_name=config["COLLECTION_NAME"] or "aiops24",
-    #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=0),
-    #     )
-    #     await pipeline.arun(documents=data, show_progress=True, num_workers=1)
-    #     # 恢复实时索引
-    #     await client.update_collection(
-    #         collection_name=config["COLLECTION_NAME"] or "aiops24",
-    #         optimizer_config=models.OptimizersConfigDiff(indexing_threshold=20000),
-    #     )
-    #     print(len(data))
-
     for folder in folders:
         collection_info = await client.get_collection(folder)
         if collection_info.points_count == 0:
@@ -79,13 +59,10 @@ async def main():
             await pipeline.arun(documents=data, show_progress=True, num_workers=1)
             # 恢复实时索引
             await client.update_collection(
-
                 collection_name=folder,
                 optimizer_config=models.OptimizersConfigDiff(indexing_threshold=20000),
             )
             print(folder + "：" + str(len(data)))
-
-    # retriever = QdrantRetriever(vector_store, embeding, similarity_top_k=config["VECTOR_TOP_K"])
 
     queries = read_jsonl("question.jsonl")
 
@@ -94,7 +71,16 @@ async def main():
 
     results = []
     for query in tqdm(queries, total=len(queries)):
-        result = await generation_with_knowledge_retrieval(query_str=query["query"], llm=llm,
+        # Multi Query: Different Perspectives
+        template = """You are an AI language model assistant. Your task is to generate five \
+different versions of the given user question to retrieve relevant documents from a vector \
+database. By generating multiple perspectives on the user question, your goal is to help \
+the user overcome some of the limitations of the distance-based similarity search. \
+Provide these alternative questions separated by newlines. Original question: {question}"""
+        prompt = ChatPromptTemplate.from_template(template).format(question=query["query"])
+        ret = await llm.acomplete(prompt)
+        querys2 = ret.text.split("/n")
+        result = await generation_with_knowledge_retrieval(origin_query=query["query"],query_strs=querys2, llm=llm,
                                                            document=query["document"], config=config,
                                                            vector_stores=vector_stores,
                                                            embeding=embeding,
@@ -110,4 +96,4 @@ if __name__ == "__main__":
     asyncio.run(main())
     end_time = time.time()
     execution_time = end_time - start_time
-    print("程序运行时间为：", execution_time, "秒")
+    print("程序运行时间为：", execution_time / 60.0, "分钟")
