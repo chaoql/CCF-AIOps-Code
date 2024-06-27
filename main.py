@@ -1,13 +1,13 @@
 import asyncio
 import time
-
+from dotenv import load_dotenv, find_dotenv
 from dotenv import dotenv_values
 from llama_index.core import Settings
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.legacy.llms import OpenAILike as OpenAI
 from qdrant_client import models
 from tqdm.asyncio import tqdm
-from langchain.prompts import ChatPromptTemplate
+from llama_index.embeddings.openai import OpenAIEmbedding
 from pipeline.ingestion import build_pipeline, build_vector_store, read_data
 from pipeline.qa import read_jsonl, save_answers
 from pipeline.rag import QdrantRetriever, generation_with_knowledge_retrieval
@@ -23,6 +23,7 @@ def list_directories(path):
 
 
 async def main():
+    _ = load_dotenv(find_dotenv())  # 导入环境
     config = dotenv_values(".env")
 
     path = './data'  # 示例路径（请替换为你的目录路径）
@@ -36,11 +37,12 @@ async def main():
         api_base="https://open.bigmodel.cn/api/paas/v4/",
         is_chat_model=True,
     )
-    embeding = HuggingFaceEmbedding(
-        model_name="BAAI/bge-large-zh-v1.5",
-        cache_folder="./",
-        embed_batch_size=128,
-    )
+    embeding = OpenAIEmbedding(model="text-embedding-3-large")
+    # embeding = HuggingFaceEmbedding(
+    #     model_name="BAAI/bge-large-zh-v1.5",
+    #     cache_folder="./BAAI/",
+    #     embed_batch_size=128,
+    # )
     Settings.embed_model = embeding
 
     # 初始化 数据ingestion pipeline 和 vector store
@@ -64,7 +66,7 @@ async def main():
             )
             print(folder + "：" + str(len(data)))
 
-    queries = read_jsonl("question.jsonl")
+    queries = read_jsonl("questionPlus.jsonl")
 
     # 生成答案
     print("Start generating answers...")
@@ -72,16 +74,9 @@ async def main():
     results = []
     for query in tqdm(queries, total=len(queries)):
         # Multi Query: Different Perspectives
-        template = """You are an AI language model assistant. Your task is to generate five \
-different versions of the given user question to retrieve relevant documents from a vector \
-database. By generating multiple perspectives on the user question, your goal is to help \
-the user overcome some of the limitations of the distance-based similarity search. \
-Provide these alternative questions separated by newlines. Original question: {question}"""
-        prompt = ChatPromptTemplate.from_template(template).format(question=query["query"])
-        ret = await llm.acomplete(prompt)
-        querys2 = ret.text.split("/n")
-        result = await generation_with_knowledge_retrieval(origin_query=query["query"],query_strs=querys2, llm=llm,
+        result = await generation_with_knowledge_retrieval(query_str=query["query"], llm=llm,
                                                            document=query["document"], config=config,
+                                                           abbreviation=query["abbreviation"],
                                                            vector_stores=vector_stores,
                                                            embeding=embeding,
                                                            )

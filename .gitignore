@@ -162,5 +162,10 @@ cython_debug/
 #.idea/
 data
 data_test
-models--BAAI--bge-large-zh-v1.5
+dataset
+BAAI/models--BAAI--bge-large-zh-v1.5
 BAAI
+VecData-text-embedding-3-large-2048
+VecData-text-embedding-3-large
+CCFAiOPS.ipynb
+testLog.py

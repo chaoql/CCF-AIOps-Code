@@ -12,15 +12,44 @@ from llama_index.core import (
     StorageContext,
     VectorStoreIndex,
 )
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore
 from llama_index.core.base.llms.types import CompletionResponse
 from llama_index.postprocessor.rankgpt_rerank import RankGPTRerank
 from langchain import hub
+from langchain.prompts import ChatPromptTemplate
 
 
 # from custom.template import QA_TEMPLATE
+def getFullName(log_file_path):
+    global lines
+    # 使用with语句安全地打开文件
+    with open(log_file_path, 'r', encoding='utf-8') as file:
+        # 读取所有行到一个列表中
+        lines = file.readlines()
+
+    # 创建一个新列表，用于存储没有空行的行
+    non_blank_lines = [line.strip() for line in lines if line.strip()]
+
+    logWords = {}
+    suolue = ""
+    suols = set()
+    wanzs = set()
+    for line in non_blank_lines:
+        if len(line) < 10:
+            if len(wanzs):
+                wanzslist = list(wanzs)
+                logWords[suolue] = wanzslist
+                wanzs.clear()
+            if line in suols:
+                continue
+            suols.add(line)
+            suolue = line
+        else:
+            wanzs.add(line)
+    return logWords
 
 
 class QdrantRetriever(BaseRetriever):
@@ -61,56 +90,111 @@ class QdrantRetriever(BaseRetriever):
 
 
 async def generation_with_knowledge_retrieval(
-        origin_query: str,
-        query_strs,
+        query_str: str,
         # retriever: BaseRetriever,
         llm: LLM,
         document: str,
         config,
+        abbreviation: str,
         embeding,
         vector_stores,
         # qa_template: str = QA_TEMPLATE,
-        reranker: BaseNodePostprocessor | None = None,
+        # reranker: BaseNodePostprocessor,
         debug: bool = False,
         progress=None,
 ) -> CompletionResponse:
-    global query_bundle
-    retriever = QdrantRetriever(vector_stores[document], embeding, similarity_top_k=int(config["VECTOR_TOP_K"]))
-    context_strs = []
-    all_node_with_scores = []
-    for query_str in query_strs:
-        query_bundle = QueryBundle(query_str=query_str)
-        node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
-        all_node_with_scores += node_with_scores
-    if debug:
-        print(f"retrieved:\n{all_node_with_scores}\n------")
-    if reranker:
-        config = dotenv_values(".env")
-        reranker = RankGPTRerank(
-            llm=OpenAI(
-                api_key=config["GLM_KEY"],
-                model="glm-4",
-                api_base="https://open.bigmodel.cn/api/paas/v4/",
-                is_chat_model=True,
-            ),
-            top_n=1,
-            verbose=True,
-        )
-        node_with_scores = reranker.postprocess_nodes(all_node_with_scores, query_bundle)
-        if debug:
-            print(f"reranked:\n{node_with_scores}\n------")
-    context_str = "\n\n".join(  # 抽取查询到的结果文本
-        [f"{node.metadata['document_title']}: {node.text}" for node in all_node_with_scores]
-    )
-    context_strs.append(context_str)
-    # set the LANGCHAIN_API_KEY environment variable (create key in settings)
-    context_str = ["\n" + str for str in context_strs]
+    # 12. 全称+简写两个问题，每个问题5选1，且去重
+    log_file_path = 'D:\MyPyCharm\LLMTuning\logName.txt'
+    Fullnames = getFullName(log_file_path)
 
-    fmt_qa_prompt = hub.pull("rlm/rag-prompt").format(
-        context=context_str, question=origin_query
-    )
+    # 单轮10选3rerank，cosine
+    retriever = QdrantRetriever(vector_stores[document], embeding, similarity_top_k=int(config["VECTOR_TOP_K"]))
+    template = """你的任务是对检索到的上下文进行判断，判断其是否有助于回答当前问题。
+问题：{question}
+上下文: {context}
+如果检索到的上下文有助于回答问题，请回答 "是"，否则请回答 "否"，并阐述理由。
+        """
+    #     tempList = []
+    query_strs = set()
+    query_strs.add(query_str)
+    abs = abbreviation.split(",")  # 当前问题包含的所有缩略词
+    context_strs = ""
+    mutiFullName = ""
+    top_n = 3
+    if abs:  # 有缩写
+        query_str2 = query_str
+        for ab in abs:  # 抽取英文缩写
+            if ab in Fullnames.keys():
+                if len(Fullnames[ab]) > 1:
+                    mutiFullName = ab
+                    continue
+                else:
+                    print(ab)
+                    print(Fullnames[ab][0])
+                    query_str2 = query_str2.replace(ab, Fullnames[ab][0])
+        query_strs.add(query_str2)
+        if mutiFullName:
+            for i in Fullnames[mutiFullName]:
+                query_str2 = query_str2.replace(mutiFullName, i)
+                query_strs.add(query_str2)
+        # query_strs.append(query_str2)
+    query_strs = list(query_strs)
+    print(query_strs)
+    print("----------------")
+    tempList = set()
+    for query_i in query_strs:  # 遍历每种提问
+        # query_plus = query_str
+        query_bundle = QueryBundle(query_str=query_i)
+        node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
+        if debug:
+            print(f"retrieved:\n{node_with_scores}\n------")
+        # if reranker:
+
+        reranker = FlagEmbeddingReranker(
+            top_n=6,
+            model="BAAI/bge-reranker-large",
+            use_fp16=True,
+        )
+        node_with_scores = reranker._postprocess_nodes(node_with_scores, query_bundle)
+        # print(len(node_with_scores))
+
+        # if debug:
+        #     print(f"reranked:\n{node_with_scores}\n------")
+
+        context_str = ""  # 当前问题检索得到的上下文信息
+        k = 0
+        for index, node in enumerate(node_with_scores):  # 遍历当前提问的检索上下文
+            if node.text in tempList:  # 搜索出重复的就向后取
+                continue
+            if k == top_n:  # 只取top_n个
+                break
+
+            prompt = ChatPromptTemplate.from_template(template).format(question=query_str,
+                                                                       context=query_str + node.text)
+            retTemp = await llm.acomplete(prompt)
+            print(retTemp.text)
+            if retTemp.text[0] == "是":  # 检索到的上下文对回答问题有帮助
+                tempList.add(node.text)
+                str = f"\n{node.metadata['document_title']}: {node.text}"
+                context_str += str
+                k += 1
+                print(context_str)
+                print("------------------")
+            # tempList.add(node.text)
+        context_strs += context_str  # 所有问题检索得到的上下文信息
+        # print(context_strs)
+        # print("==================")
+
+    template = """你是问题解答任务的助手。使用以下检索到的上下文回答问题，答案最多不超过三句话，简明扼要。
+
+问题： {question} 
+
+上下文： {context} 
+
+答案："""
+    fmt_qa_prompt = ChatPromptTemplate.from_template(template).format(context=context_strs, question=query_str)
 
     ret = await llm.acomplete(fmt_qa_prompt)
     if progress:
         progress.update(1)
-    return ret
+    return [ret, context_strs]

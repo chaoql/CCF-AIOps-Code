@@ -9,7 +9,7 @@ from llama_index.core.schema import Document, MetadataMode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
-
+from llama_index.llms.openai import OpenAI
 from custom.template import SUMMARY_EXTRACT_TEMPLATE
 from custom.transformation import CustomFilePathExtractor, CustomTitleExtractor
 
@@ -32,14 +32,15 @@ def build_pipeline(
         vector_store: BasePydanticVectorStore = None,
 ) -> IngestionPipeline:
     transformation = [
+        # SentenceSplitter(chunk_size=2048, chunk_overlap=256),
         SentenceSplitter(chunk_size=1024, chunk_overlap=50),
         CustomTitleExtractor(metadata_mode=MetadataMode.EMBED),
         CustomFilePathExtractor(last_path_length=4, metadata_mode=MetadataMode.EMBED),
-        # SummaryExtractor(
-        #     llm=llm,
-        #     metadata_mode=MetadataMode.EMBED,
-        #     prompt_template=template or SUMMARY_EXTRACT_TEMPLATE,
-        # ),
+        SummaryExtractor(
+            llm = OpenAI(model="gpt-3.5-turbo"),
+            metadata_mode=MetadataMode.EMBED,
+            prompt_template=template or SUMMARY_EXTRACT_TEMPLATE,
+        ),
         embed_model,
     ]
 
@@ -51,7 +52,8 @@ async def build_vector_store(
 ):
     client = AsyncQdrantClient(  # Qdrant向量数据库
         # url=config["QDRANT_URL"],
-        location=":memory:"
+        # location=":memory:",
+        path="D:\\MyPyCharm\\LLMTuning\\aiops24-RAG-demo-glm\\demo\\VecData-text-embedding-3-large",
     )
     VSList = {}
     if reindex:  # 重新索引
@@ -62,12 +64,11 @@ async def build_vector_store(
         except UnexpectedResponse as e:
             print(f"Collection not found: {e}")
     try:
-
         for forder in folders:
             await client.create_collection(  # 生成collection
                 collection_name=forder,
                 vectors_config=models.VectorParams(
-                    size=config["VECTOR_SIZE"], distance=models.Distance.DOT
+                    size=int(config["VECTOR_SIZE"]), distance=models.Distance.DOT
                 ),
             )
             VSList[forder] = QdrantVectorStore(
@@ -76,13 +77,19 @@ async def build_vector_store(
                 parallel=4,
                 batch_size=32,
             )
-
         # await client.create_collection(  # 生成collection
         #     collection_name=config["COLLECTION_NAME"] or "aiops24",
         #     vectors_config=models.VectorParams(
         #         size=config["VECTOR_SIZE"] or 1024, distance=models.Distance.DOT
         #     ),
         # )
-    except UnexpectedResponse:
+    except Exception as e:
+        for forder in folders:
+            VSList[forder] = QdrantVectorStore(
+                aclient=client,
+                collection_name=forder,
+                parallel=4,
+                batch_size=32,
+            )
         print("Collection already exists")
     return client, VSList
