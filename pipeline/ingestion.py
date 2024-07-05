@@ -1,3 +1,5 @@
+import os
+
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.extractors import SummaryExtractor
@@ -10,8 +12,10 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
 from llama_index.llms.openai import OpenAI
+# from llama_index.legacy.llms import OpenAILike as OpenAI
 from custom.template import SUMMARY_EXTRACT_TEMPLATE
 from custom.transformation import CustomFilePathExtractor, CustomTitleExtractor
+from .glmfz import ChatGLM
 
 
 def read_data(path: str = "data") -> list[Document]:
@@ -32,12 +36,16 @@ def build_pipeline(
         vector_store: BasePydanticVectorStore = None,
 ) -> IngestionPipeline:
     transformation = [
-        # SentenceSplitter(chunk_size=2048, chunk_overlap=256),
         SentenceSplitter(chunk_size=1024, chunk_overlap=50),
         CustomTitleExtractor(metadata_mode=MetadataMode.EMBED),
         CustomFilePathExtractor(last_path_length=4, metadata_mode=MetadataMode.EMBED),
+        # SummaryExtractor(
+        #     llm=ChatGLM(model='glm-4', api_key=os.getenv("GLM_KEY")),
+        #     metadata_mode=MetadataMode.EMBED,
+        #     prompt_template=template or SUMMARY_EXTRACT_TEMPLATE,
+        # ),
         SummaryExtractor(
-            llm = OpenAI(model="gpt-3.5-turbo"),
+            llm=OpenAI(model="gpt-3.5-turbo"),
             metadata_mode=MetadataMode.EMBED,
             prompt_template=template or SUMMARY_EXTRACT_TEMPLATE,
         ),
@@ -53,7 +61,8 @@ async def build_vector_store(
     client = AsyncQdrantClient(  # Qdrant向量数据库
         # url=config["QDRANT_URL"],
         # location=":memory:",
-        path="D:\\MyPyCharm\\LLMTuning\\aiops24-RAG-demo-glm\\demo\\VecData-text-embedding-3-large",
+        path="D:\\MyPyCharm\\LLMTuning\\aiops24-RAG-demo-glm\\demo\\VecData-text-embedding-3-large-imageSummary",
+        # path="D:\\MyPyCharm\\LLMTuning\\aiops24-RAG-demo-glm\\demo\\VecData-bge-large-zh-v1.5-imageSummary",
     )
     VSList = {}
     if reindex:  # 重新索引
@@ -77,12 +86,6 @@ async def build_vector_store(
                 parallel=4,
                 batch_size=32,
             )
-        # await client.create_collection(  # 生成collection
-        #     collection_name=config["COLLECTION_NAME"] or "aiops24",
-        #     vectors_config=models.VectorParams(
-        #         size=config["VECTOR_SIZE"] or 1024, distance=models.Distance.DOT
-        #     ),
-        # )
     except Exception as e:
         for forder in folders:
             VSList[forder] = QdrantVectorStore(

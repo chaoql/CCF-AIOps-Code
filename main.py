@@ -9,7 +9,7 @@ from qdrant_client import models
 from tqdm.asyncio import tqdm
 from llama_index.embeddings.openai import OpenAIEmbedding
 from pipeline.ingestion import build_pipeline, build_vector_store, read_data
-from pipeline.qa import read_jsonl, save_answers
+from pipeline.qa import read_jsonl, save_answers, save_now, judge_json, save_context_now
 from pipeline.rag import QdrantRetriever, generation_with_knowledge_retrieval
 import os
 
@@ -26,7 +26,7 @@ async def main():
     _ = load_dotenv(find_dotenv())  # 导入环境
     config = dotenv_values(".env")
 
-    path = './data'  # 示例路径（请替换为你的目录路径）
+    path = './data_imageSummary'  # 示例路径（请替换为你的目录路径）
     folders = list_directories(path)  # 获取文件夹名称列表
     print(folders)
 
@@ -37,6 +37,7 @@ async def main():
         api_base="https://open.bigmodel.cn/api/paas/v4/",
         is_chat_model=True,
     )
+    # embeding_name = "gte-Qwen1.5-7B-instruct"
     embeding = OpenAIEmbedding(model="text-embedding-3-large")
     # embeding = HuggingFaceEmbedding(
     #     model_name="BAAI/bge-large-zh-v1.5",
@@ -51,7 +52,7 @@ async def main():
     for folder in folders:
         collection_info = await client.get_collection(folder)
         if collection_info.points_count == 0:
-            data = read_data("data/" + folder)
+            data = read_data("./data_imageSummary/" + folder)
             pipeline = build_pipeline(llm, embeding, vector_store=vector_stores[folder])
             # 暂时停止实时索引
             await client.update_collection(
@@ -66,25 +67,26 @@ async def main():
             )
             print(folder + "：" + str(len(data)))
 
+    # queries = read_jsonl("questionAdd.jsonl")
     queries = read_jsonl("questionPlus.jsonl")
 
     # 生成答案
     print("Start generating answers...")
 
-    results = []
-    for query in tqdm(queries, total=len(queries)):
-        # Multi Query: Different Perspectives
+    results_name = "submit_result_ReImageSummary.jsonl"
+    # results_name = "context_add.jsonl"
+    resNum = judge_json(results_name)
+    for index, query in tqdm(enumerate(queries), total=len(queries)):
+        if index + 1 <= resNum:
+            continue
         result = await generation_with_knowledge_retrieval(query_str=query["query"], llm=llm,
                                                            document=query["document"], config=config,
                                                            abbreviation=query["abbreviation"],
                                                            vector_stores=vector_stores,
                                                            embeding=embeding,
                                                            )
-        results.append(result)
-
-    # 处理结果
-    save_answers(queries, results, "submit_result.jsonl")
-
+        save_now(query, result, results_name)  # 提前保存
+        # save_context_now(query, result, results_name)
 
 if __name__ == "__main__":
     start_time = time.time()

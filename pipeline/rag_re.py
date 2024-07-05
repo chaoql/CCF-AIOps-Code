@@ -104,29 +104,21 @@ async def generation_with_knowledge_retrieval(
         debug: bool = False,
         progress=None,
 ) -> CompletionResponse:
+    # 12. 全称+简写两个问题，每个问题5选1，且去重
     log_file_path = 'D:\\MyPyCharm\\LLMTuning\\aiops24-RAG-demo-glm\\demo\\logName.txt'
     Fullnames = getFullName(log_file_path)
-    top_n = 2
+    # 单轮10选3rerank，cosine
+    retriever = QdrantRetriever(vector_stores[document], embeding, similarity_top_k=int(config["VECTOR_TOP_K"]))
+    template = """你的任务是对检索到的上下文进行判断，判断其是否有助于回答当前问题。
+问题：{question}
+上下文: {context}
+如果检索到的上下文有助于回答问题，请回答 "是"，否则请回答 "否"，并阐述理由。"""
     query_strs = set()
     query_strs.add(query_str)
-    mutiFullName = ""
-    all_node_with_scores = []
     abs = abbreviation.split(",")  # 当前问题包含的所有缩略词
-    reranker = FlagEmbeddingReranker(
-        top_n=6,
-        model="BAAI/bge-reranker-large",
-        use_fp16=True,
-    )
-    template = """你的任务是对检索到的上下文进行判断，判断其是否有助于回答当前问题。
-    问题：{question}
-    上下文: {context}
-    如果检索到的上下文有助于回答问题，请回答 "是"，否则请回答 "否"，并阐述理由。"""
     context_strs = ""
-    tempList = set()
-    file_paths = []
-    k = 0  # 控制当前已经取的上下文数量
-
-    # 获取两个问题
+    mutiFullName = ""
+    top_n = 2
     if abs:  # 有缩写
         query_str2 = query_str
         for ab in abs:  # 抽取英文缩写
@@ -146,50 +138,50 @@ async def generation_with_knowledge_retrieval(
         # query_strs.append(query_str2)
     query_strs = list(query_strs)
     print(query_strs)
-    for query_i in query_strs:  # 遍历每种提问
-        # 在多个数据集中分别检索并合并检索内容
-        if document == "umac":
-            for i in range(8):
-                document_str = "umac" + str(i)
-                retriever = QdrantRetriever(vector_stores[document_str], embeding,
-                                            similarity_top_k=int(config["VECTOR_TOP_K"]))
-                query_bundle = QueryBundle(query_str=query_i)
-                node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
-                for node in node_with_scores:
-                    all_node_with_scores.append(node)
-        else:
-            retriever = QdrantRetriever(vector_stores[document], embeding, similarity_top_k=int(config["VECTOR_TOP_K"]))
+    # print("----------------")
+    tempList = set()
+    file_paths = []
+    for i in range(3):
+        for query_i in query_strs:  # 遍历每种提问
+            # query_plus = query_str
             query_bundle = QueryBundle(query_str=query_i)
             node_with_scores = await retriever.aretrieve(query_bundle)  # 返回包含得分信息的节点列表
-            all_node_with_scores = node_with_scores
 
-        # 重排序
-        all_node_with_scores = reranker._postprocess_nodes(all_node_with_scores, QueryBundle(query_str=query_i))
+            reranker = FlagEmbeddingReranker(
+                top_n=5,
+                model="BAAI/bge-reranker-large",
+                use_fp16=True,
+            )
+            node_with_scores = reranker._postprocess_nodes(node_with_scores, query_bundle)
 
-        # 选择性RAG
-        context_str = ""  # 当前问题检索得到的上下文信息
-        for index, node in enumerate(all_node_with_scores):  # 遍历当前提问的检索上下文
-            if node.text in tempList:  # 搜索出重复的就向后取
-                continue
-            if k == top_n:  # 每个问题只取top_n个
-                break
-            prompt = ChatPromptTemplate.from_template(template).format(question=query_i, context=node.text)
-            retTemp = await llm.acomplete(prompt)
-            print(retTemp.text)
-            if retTemp.text[0] == "是":  # 检索到的上下文对回答问题有帮助
-                tempList.add(node.text)
-                context_str += f"\n{node.metadata['document_title']}: {node.text}"
-                k += 1
-                file_paths.append(node.metadata['file_path'])
-                print(node.metadata['file_path'])
-        context_strs += context_str  # 所有问题检索得到的上下文信息
+            context_str = ""  # 当前问题检索得到的上下文信息
+            k = 0
+            for index, node in enumerate(node_with_scores):  # 遍历当前提问的检索上下文
+                if node.text in tempList:  # 搜索出重复的就向后取
+                    continue
+                if k == top_n:  # 只取top_n个
+                    break
+
+                prompt = ChatPromptTemplate.from_template(template).format(question=query_str,
+                                                                           context=context_strs + node.text)
+                retTemp = await llm.acomplete(prompt)
+                print(retTemp.text)
+                if retTemp.text[0] == "是":  # 检索到的上下文对回答问题有帮助
+                    tempList.add(node.text)
+                    str = f"\n{node.metadata['document_title']}: {node.text}"
+                    context_str += str
+                    k += 1
+                    file_paths.append(node.metadata['file_path'])
+                    print(node.metadata['file_path'])
+            context_strs += context_str  # 所有问题检索得到的上下文信息
+
     template = """你是问题解答任务的助手。使用以下检索到的上下文回答问题，答案最多不超过三句话，简明扼要。
 
-    问题： {question}
+问题： {question} 
 
-    上下文： {context}
+上下文： {context} 
 
-    答案："""
+答案："""
     fmt_qa_prompt = ChatPromptTemplate.from_template(template).format(context=context_strs, question=query_str)
     ret = await llm.acomplete(fmt_qa_prompt)
     if progress:
